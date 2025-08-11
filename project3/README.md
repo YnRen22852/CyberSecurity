@@ -1,79 +1,103 @@
-## 用circom实现poseidon2哈希算法的电路
-(1) poseidon2哈希算法参数参考参考文档1的Table1，用(n,t,d)=(256,3,5)或(256,2,5)
+## Poseidon2 哈希电路实现方案（Circom + Groth16）
 
-(2)电路的公开输入用poseidon2哈希值，隐私输入为哈希原象，哈希算法的输入只考虑一个block即可。
+### 1. 算法与参数
 
-(3) 用Groth16算法生成证明
-### 实现思路
-#### Poseidon2算法
-* 基于海绵结构，使用置换函数处理输入
+* **算法类型**：Poseidon2（基于海绵结构）
+* **状态宽度**：`t = 3`（2 个输入 + 1 容量位）
+* **位宽**：`n = 256`
+* **S-box 指数**：`d = 5`
+* **轮数参数**：
 
-#### 电路设计
+  * **完整轮数（RF\_FULL）**：8（首尾各 4 轮）
+  * **部分轮数（RF\_PARTIAL）**：56（中间部分）
+  * **总轮数**：64（8 + 56）
 
-* 隐私输入：两个256位字段元素（原象）
+---
 
-* 公开输入：哈希结果（256位）
+### 2. 电路输入/输出设计
 
-* 使用参数(n,t,d) = (256,3,5)（状态大小3，S-box指数5）
+* **隐私输入（private）**
+  `in_private[2]`：两个 256 位字段元素（原像）
+* **公开输入（public）**
+  `hash`：256 位 Poseidon2 哈希值
 
-#### 置换过程
+---
 
-* ARK：添加轮常数
+### 3. Poseidon2 置换结构
 
-* S-box：非线性变换（x⁵）
+1. **初始化状态**
 
-* MDS：线性扩散层
+   $$
+   state = [in\_private[0],\ in\_private[1],\ 0]
+   $$
+2. **每轮处理**：
 
-#### Groth16
-* 使用Circom的Groth16模板生成证明
+   * **ARK（Add Round Key）**：加轮常数
+   * **S-box**：非线性变换 $x^5$
+   * **MDS（Maximum Distance Separable）**：线性扩散层
+3. **输出**
 
-### 实现说明
-#### 算法参数
+   * 哈希值为 `state[0]`
 
-* 状态宽度 t = 3（两个输入 + 1个容量）
+---
 
-* 完整轮数 RF_FULL = 8（首尾各4轮）
+### 4. 电路模块划分
 
-* 部分轮数 RF_PARTIAL = 56（中间部分）
+#### 4.1 SBox.circom
 
-* 总轮数 64（8+56）
+* 功能：计算 $x^5$
+* 用于完整轮和部分轮（部分轮只对一个元素做 S-box）
 
-#### 核心组件：
+#### 4.2 Poseidon2Round.circom
 
-##### SBox
-实现非线性变换 $x^5$
+* 功能：实现单轮的 ARK → S-box → MDS
+* 轮类型：
 
-##### Poseidon2Round
-* 单轮处理逻辑
-  
-* 根据轮类型应用完整/部分S-box
-  
-* 使用硬编码的MDS矩阵和轮常数
+  * 完整轮：所有元素做 S-box
+  * 部分轮：仅第一个元素做 S-box
 
-##### Poseidon2Hash
-* 主哈希电路
+#### 4.3 Poseidon2Hash.circom
 
-* 初始化状态 [in1, in2, 0]
+* 功能：Poseidon2 哈希主电路
+* 步骤：
 
-* 连接64轮处理组件
+  1. 初始化状态
+  2. 循环执行 64 轮置换
+  3. 输出 `state[0]`
+  4. 添加 `===` 约束保证输出与公开输入一致
 
-* 输出最终状态的第一个元素作为哈希值
+---
 
-##### Groth16集成
+### 5. Groth16 集成流程
 
-* 公开信号：hash（哈希输出）
+#### 步骤：
 
-* 隐私信号：in_private[2]（两个输入字段）
+1. 编写 Circom 电路（Poseidon2Hash）
+2. 编译生成 R1CS 和 WASM
+3. **可信设置**（Trusted Setup）
+4. 生成证明密钥（`pk`）和验证密钥（`vk`）
+5. 计算 Witness
+6. 使用 `groth16.prove` 生成证明
+7. 使用 `groth16.verify` 验证证明
 
-* 使用 === 约束确保公开信号正确性
+#### 流程图：
 
-### 编译和证明生成
-#### 安装依赖
 ```
-npm install circom circomlib snarkjs
+graph TD
+    A[编写 Circom 电路] --> B[编译电路]
+    B --> C[生成 R1CS 和 WASM]
+    C --> D[可信设置]
+    D --> E[生成证明密钥 pk 和验证密钥 vk]
+    E --> F[计算 Witness]
+    F --> G[生成证明 Proof]
+    G --> H[验证证明]
 ```
-#### 创建测试脚本
-```
+
+---
+
+### 6. 测试脚本示例（Node.js）
+
+```javascript
 const { wasm: wasmTester } = require("circom_tester");
 const { groth16 } = require("snarkjs");
 const { poseidon } = require("circomlibjs");
@@ -81,31 +105,31 @@ const { poseidon } = require("circomlibjs");
 async function main() {
     // 1. 编译电路
     const circuit = await wasmTester("poseidon2.circom");
-    
-    // 2. 准备输入数据
+
+    // 2. 准备输入
     const inputs = {
         in_private: [
-            "12345678901234567890123456789012",  // 输入1
-            "98765432109876543210987654321098"   // 输入2
+            "12345678901234567890123456789012",
+            "98765432109876543210987654321098"
         ]
     };
-    
-    // 3. 计算预期哈希值 (使用JavaScript实现作为参考)
+
+    // 3. 计算参考哈希
     const hash = await poseidon(inputs.in_private);
     inputs.hash = hash.toString();
-    
+
     // 4. 生成见证
     const witness = await circuit.calculateWitness(inputs);
-    
-    // 5. Groth16设置
+
+    // 5. Groth16 设置
     const zkey = await groth16.setup(circuit);
-    
+
     // 6. 生成证明
     const { proof, publicSignals } = await groth16.prove(zkey, witness);
-    
+
     console.log("Proof:", proof);
     console.log("Public Signals:", publicSignals);
-    
+
     // 7. 验证证明
     const verificationKey = await groth16.exportVerificationKey(zkey);
     const isValid = await groth16.verify(verificationKey, publicSignals, proof);
@@ -114,14 +138,11 @@ async function main() {
 
 main().catch(console.error);
 ```
-### Groth16 在 Circom 中的实现流程
-```
-graph TD
-    A[编写 Circom 电路] --> B[编译电路]
-    B --> C[生成 R1CS 和 WASM]
-    C --> D[可信设置]
-    D --> E[生成证明密钥 pk 和验证密钥 vk]
-    E --> F[计算见证 Witness]
-    F --> G[生成证明 Proof]
-    G --> H[验证证明]
-```
+
+---
+
+### 总结
+
+该方案使用 Circom 实现 Poseidon2 哈希电路，采用 (n,t,d) = (256,3,5) 参数，并将哈希值作为公开输入，原像作为隐私输入，通过 Groth16 生成可验证的零知识证明，流程包括电路编写、编译、可信设置、见证计算、证明生成与验证。
+
+---
